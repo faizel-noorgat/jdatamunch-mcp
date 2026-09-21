@@ -157,7 +157,7 @@ The base package's only default network behavior is an anonymous savings counter
 JDATAMUNCH_SHARE_SAVINGS=0
 ```
 
-`index_repo` reaches GitHub only when you invoke it, using a token you supply. Embedding providers are called only when you configure one. There is no scheduler and no background reporting.
+`index_repo` reaches GitHub only when you invoke it, using a token you supply. Embedding providers are called only when you configure one, and the optional LLM summarizer is off until you name a provider for it — see [Optional AI providers](#optional-ai-providers) for what each one sends and where. There is no scheduler and no background reporting.
 
 Full detail, including what each optional extra pulls in: [SECURITY.md](SECURITY.md).
 
@@ -170,6 +170,50 @@ Full detail, including what each optional extra pulls in: [SECURITY.md](SECURITY
 - **Excel and Parquet need optional extras**, which pull additional dependencies.
 - **A default `describe_column` will not be labelled `offloadable`.** jDataMunch does not assert index freshness it cannot prove, so the cheap freshness reading answers `unknown` and the annotation fails closed. That is deliberate — see [the annotation section](#offloadable-work-annotation).
 - **jDataMunch does not read code or prose.** Code symbols belong to [jcodemunch-mcp](https://github.com/jgravelle/jcodemunch-mcp); documentation sections to [jdocmunch-mcp](https://github.com/jgravelle/jdocmunch-mcp).
+
+---
+
+## Optional AI providers
+
+Both are opt-in, both are off by default, and neither is required for any tool to work. Full details in [USER-MANUAL.md](USER-MANUAL.md#configuration).
+
+### `ai_summary` is rule-based unless you say otherwise
+
+Every column carries an `ai_summary` field. Unless you enable the LLM summarizer below, that text is **generated locally from the column's profile by deterministic rules** — no API key, no network call, no model. The field name predates this and is the most misleading thing in the package; treat "ai" as a label on a field, not a claim about how it was written. Where a summary is actually model-authored the response says so (`ai_summary_source: "llm"`).
+
+### Embeddings: an OpenAI-compatible endpoint
+
+Alongside sentence-transformers, Gemini and OpenAI, any endpoint speaking the OpenAI embeddings API is now a first-class provider — a local runtime (Ollama, llama.cpp, LM Studio, vLLM), Voyage AI, OpenRouter, a gateway.
+
+```bash
+pip install "jdatamunch-mcp[openai]"
+
+export JDATAMUNCH_EMBEDDING_PROVIDER=openai-compatible
+export JDATAMUNCH_OPENAI_COMPAT_URL=http://127.0.0.1:11434/v1
+export JDATAMUNCH_OPENAI_COMPAT_MODEL=nomic-embed-text
+```
+
+Optional: `JDATAMUNCH_OPENAI_COMPAT_API_KEY` (defaults to the literal `local`) and `JDATAMUNCH_OPENAI_COMPAT_BATCH_SIZE` (default `32`).
+
+**It is never auto-detected.** A URL sitting in the environment is not a decision, so the provider name is the opt-in. `JDATAMUNCH_EMBEDDING_PROVIDER` also refuses an unrecognized value rather than falling through to auto-detection: a typo that quietly selected a *different* provider is how indexed rows would leave your machine unasked. The key defaults to `local` and never falls back to `OPENAI_API_KEY`, so pointing this at your own machine cannot leak your real OpenAI credential. A batch that fails yields empty vectors for those texts; the rest of the batches still run.
+
+### Summaries: an LLM summarizer (off by default)
+
+```bash
+pip install "jdatamunch-mcp[openai]"
+
+export JDATAMUNCH_SUMMARIZER_PROVIDER=openai-compatible
+export JDATAMUNCH_SUMMARIZER_URL=http://127.0.0.1:11434/v1
+export JDATAMUNCH_SUMMARIZER_MODEL=gpt-oss:20b
+```
+
+Without the extra the feature logs a warning and falls back to rule-based summaries rather than failing an index.
+
+Optional: `JDATAMUNCH_SUMMARIZER_API_KEY` (defaults to `local`), `JDATAMUNCH_SUMMARIZER_TIMEOUT` (default `30` seconds), `JDATAMUNCH_ALLOW_REMOTE_SUMMARIZER` (see below).
+
+**Where your data goes.** Summarization prompts contain a column's name, type, statistics and **sample values**, and sample values are where PII lives. A loopback URL needs no opt-in. Any other host is **refused by default** — and the refusal is returned in the tool response, not merely written to a log, because a refusal nobody sees is indistinguishable from a model with nothing to say. `JDATAMUNCH_ALLOW_REMOTE_SUMMARIZER=1` is the opt-in, and taking it means your content leaves the machine and you pay per call.
+
+**A summarizer outage cannot break your workflow.** Any exception, timeout, empty or nonsense response falls back to the rule-based text; indexing and tool calls succeed either way. After 3 consecutive failures it stops calling for the rest of the process. `index_local` and `summarize_dataset` report which path produced each summary, and how many came from each.
 
 ---
 

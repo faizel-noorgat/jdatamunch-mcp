@@ -37,9 +37,9 @@ Each of these happens only when you invoke it, never on import and never in the 
 
 - **GitHub repository indexing.** `index_repo` fetches data files from `api.github.com` using a token you supply. Private repositories require your own credential; jDataMunch stores nothing and proxies nothing.
 - **Embedding providers.** When you configure one, `embed_dataset` and semantic search call that provider's API. **Column names and sampled values are sent to the provider you chose** — this is inherent to embedding them, and it is why no provider is configured by default.
-- **AI summaries.** `JDATAMUNCH_USE_AI_SUMMARIES` calls your configured provider only when enabled.
+- **LLM summaries — off by default.** With `JDATAMUNCH_SUMMARIZER_PROVIDER=openai-compatible`, summary prompts are sent to `JDATAMUNCH_SUMMARIZER_URL`. ⚠ **The prompt carries column names, statistics and sample values**, and sample values are where PII lives. A non-loopback URL is therefore *refused* unless `JDATAMUNCH_ALLOW_REMOTE_SUMMARIZER=1` opts in, and the refusal is returned in the tool response rather than only logged. With nothing configured — the default — no client is constructed and no request is made; summaries are generated locally from the column profile by deterministic rules.
 
-⚠ **Paid cloud providers are never called automatically.** Setting a provider API key in your environment is not consent to bill it; jDataMunch requires an explicit opt-in before sending anything to a paid endpoint.
+⚠ **Paid cloud providers are never called automatically.** Setting a provider API key in your environment is not consent to bill it; jDataMunch requires an explicit opt-in before sending anything to a paid endpoint. The same rule applies to URLs: an `openai-compatible` endpoint is reached only by being named, never inferred from a base URL that happens to be present.
 
 ---
 
@@ -66,8 +66,10 @@ Response size is bounded by `JDATAMUNCH_MAX_RESPONSE_TOKENS` and `JDATAMUNCH_MAX
 | `excel` | `.xlsx` / `.xls` | Spreadsheet parsing libraries |
 | `parquet` | `.parquet` | Columnar format libraries |
 | `semantic` | Embedding-based column search | Local model runtime; no network unless a remote provider is configured |
-| `anthropic` / `gemini` | AI summaries | Calls that provider's API when enabled |
-| `all` | All of the above | All of the above |
+| `gemini` | Gemini embeddings | Calls that provider's API when a Gemini embedding provider is configured |
+| `openai` | OpenAI / OpenAI-compatible embeddings, and the optional LLM summarizer | Calls that endpoint's API when one is configured; ships no provider by default |
+| `anthropic` | Nothing | **Declared but unused** — no module in `src/` imports it. Kept for compatibility with existing installs. |
+| `all` | All of the above | All of the above, including `anthropic`, which does nothing |
 
 The base install has none of these.
 
@@ -78,9 +80,15 @@ The base install has none of these.
 | Variable | Default | Effect |
 |---|---|---|
 | `JDATAMUNCH_SHARE_SAVINGS` | on | `0` disables the anonymous savings counter entirely |
-| `JDATAMUNCH_USE_AI_SUMMARIES` | off | Enables calls to a configured summary provider |
+| `JDATAMUNCH_SUMMARIZER_PROVIDER` | off | Names a summarizer provider. **Off by default** — summaries are generated locally by rules until this is set. |
+| `JDATAMUNCH_SUMMARIZER_URL` | — | The summarizer endpoint. A non-loopback host is refused unless `JDATAMUNCH_ALLOW_REMOTE_SUMMARIZER=1`. |
+| `JDATAMUNCH_ALLOW_REMOTE_SUMMARIZER` | off | The opt-in that permits sending summary prompts (column names, statistics, **sample values**) to a remote host. |
+| `JDATAMUNCH_EMBEDDING_PROVIDER` | off | Names an embedding provider explicitly. An unrecognized value selects nothing rather than falling through to auto-detection. |
+| `JDATAMUNCH_OPENAI_COMPAT_URL` | — | An OpenAI-compatible embeddings endpoint. Reached only when `JDATAMUNCH_EMBEDDING_PROVIDER=openai-compatible`; never auto-detected. |
 | `JDATAMUNCH_PERF_TELEMETRY` | off | Enables the local-only performance ledger |
 | `JDATAMUNCH_EAGER_EMBED_IMPORT` | on | `0` defers the startup embedding import (see the Windows deadlock note above) |
 | `JDATAMUNCH_OFFLOADABLE` | off | Adds the advisory `_meta.offloadable` label; sends nothing anywhere |
 
 A default install with no configuration sends nothing but the anonymous counter, and that is one variable away from silent.
+
+⚠ Note on `use_ai_summaries`: `index_local` accepts this parameter and `config.get_use_ai_summaries()` reads `JDATAMUNCH_USE_AI_SUMMARIES`, but **neither has any effect** — the parameter has been unused since v0.1.0 and no code path calls the config helper. It is documented here only because an earlier revision of this file described it as gating AI summary calls, which it never did. The real switch is `JDATAMUNCH_SUMMARIZER_PROVIDER`.

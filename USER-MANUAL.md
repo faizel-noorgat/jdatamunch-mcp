@@ -540,22 +540,118 @@ jDataMunch works out of the box with zero configuration. These settings are avai
 | `JDATAMUNCH_MAX_RESPONSE_TOKENS` | `8,000` | Token budget cap per tool response |
 | `JDATAMUNCH_SHARE_SAVINGS` | `1` | Anonymous telemetry (set `0` to disable) |
 
-### AI-enhanced features (optional)
+### Credentials (optional)
 
 | Setting | What it enables |
 |---------|----------------|
-| `ANTHROPIC_API_KEY` | AI-powered column summaries via Claude |
-| `GOOGLE_API_KEY` | AI-powered column summaries via Gemini; also enables Gemini embeddings |
+| `GOOGLE_API_KEY` | Gemini embeddings for semantic search |
 | `OPENAI_API_KEY` | OpenAI embeddings for semantic search |
 | `GITHUB_TOKEN` | Access to private GitHub repos for `index_repo` |
 
+> **On `ai_summary`.** The `ai_summary` field on every column is **rule-based
+> prose**, generated locally from the column's profile — no API key, no network,
+> no model. The name is a legacy of an earlier design and is the one thing in
+> this manual most likely to mislead you. If you want a summary actually written
+> by a model, enable the LLM summarizer below; it is off unless you turn it on,
+> and when it is on the response tells you which summaries came from the model.
+
 ### Embedding providers for semantic search
 
-jDataMunch supports three embedding providers. The first one it finds is used:
+jDataMunch supports four embedding providers. With nothing set, it auto-detects
+the first configured one:
 
 1. **sentence-transformers** (local, free) — install with `pip install "jdatamunch-mcp[semantic]"`. Set `JDATAMUNCH_EMBED_MODEL` to choose a model.
 2. **Gemini** — set `GOOGLE_API_KEY`. Optionally set `GOOGLE_EMBED_MODEL`.
 3. **OpenAI** — set `OPENAI_API_KEY`. Optionally set `OPENAI_EMBED_MODEL`.
+4. **OpenAI-compatible** — any endpoint speaking the OpenAI embeddings API: a local runtime (Ollama, llama.cpp, LM Studio, vLLM), Voyage AI, OpenRouter, a gateway. **Never auto-detected** — you must name it with `JDATAMUNCH_EMBEDDING_PROVIDER=openai-compatible`. See below.
+
+`JDATAMUNCH_EMBEDDING_PROVIDER` overrides auto-detection and names a provider
+explicitly. Accepted values are `sentence-transformers` (aliases `local`,
+`sentence_transformers`), `gemini`, `openai`, `openai-compatible` (alias
+`openai_compatible`), and `none` to disable embeddings entirely. An unrecognized
+value selects **nothing** rather than falling back to auto-detection — a typo
+that silently selected a different provider would send your indexed rows
+somewhere you did not choose.
+
+#### OpenAI-compatible embeddings
+
+| Setting | Required | Default | What it controls |
+|---------|----------|---------|-----------------|
+| `JDATAMUNCH_EMBEDDING_PROVIDER` | yes | — | Must be `openai-compatible` |
+| `JDATAMUNCH_OPENAI_COMPAT_URL` | yes | — | Base URL, e.g. `http://127.0.0.1:11434/v1` |
+| `JDATAMUNCH_OPENAI_COMPAT_MODEL` | yes | — | Model name, e.g. `nomic-embed-text` |
+| `JDATAMUNCH_OPENAI_COMPAT_API_KEY` | no | `local` | Sent as the bearer token |
+| `JDATAMUNCH_OPENAI_COMPAT_BATCH_SIZE` | no | `32` | Texts per request; a non-integer or `<= 0` is ignored |
+
+```bash
+pip install "jdatamunch-mcp[openai]"
+
+export JDATAMUNCH_EMBEDDING_PROVIDER=openai-compatible
+export JDATAMUNCH_OPENAI_COMPAT_URL=http://127.0.0.1:11434/v1
+export JDATAMUNCH_OPENAI_COMPAT_MODEL=nomic-embed-text
+```
+
+The API key defaults to the literal `local`, which most local runtimes ignore. It
+is deliberately **not** a fallback to `OPENAI_API_KEY`: an endpoint you pointed at
+your own machine should never be handed your real OpenAI credential. If your
+endpoint needs a real key, set `JDATAMUNCH_OPENAI_COMPAT_API_KEY` explicitly.
+
+Texts are sent in batches. A batch that fails (bad model name, endpoint down)
+yields empty vectors for those texts and the remaining batches still run, so one
+rejected batch does not discard the vectors already computed.
+
+### LLM summaries (optional, off by default)
+
+By default summaries are rule-based (see the note above). Setting
+`JDATAMUNCH_SUMMARIZER_PROVIDER` replaces them with text from an
+OpenAI-compatible chat endpoint.
+
+| Setting | Required | Default | What it controls |
+|---------|----------|---------|-----------------|
+| `JDATAMUNCH_SUMMARIZER_PROVIDER` | yes | *(unset — off)* | `openai-compatible`, or `none` |
+| `JDATAMUNCH_SUMMARIZER_URL` | yes | — | Base URL; `/chat/completions` is appended |
+| `JDATAMUNCH_SUMMARIZER_MODEL` | yes | — | Model name |
+| `JDATAMUNCH_SUMMARIZER_API_KEY` | no | `local` | Sent as the bearer token |
+| `JDATAMUNCH_SUMMARIZER_TIMEOUT` | no | `30` | Seconds per request |
+| `JDATAMUNCH_ALLOW_REMOTE_SUMMARIZER` | no | *(unset)* | Set to `1` to allow a non-loopback URL |
+
+Install the client for it first — `pip install "jdatamunch-mcp[openai]"` — then:
+
+```bash
+export JDATAMUNCH_SUMMARIZER_PROVIDER=openai-compatible
+export JDATAMUNCH_SUMMARIZER_URL=http://127.0.0.1:11434/v1
+export JDATAMUNCH_SUMMARIZER_MODEL=gpt-oss:20b
+```
+
+Without that extra the feature logs a warning and falls back to rule-based summaries; it never fails an index.
+
+**Where the content goes.** The prompt for a column contains that column's name,
+type, statistics and **sample values**. Sample values are where PII lives — an
+email column's samples are email addresses. So:
+
+* A **loopback URL** (`127.0.0.1`, `localhost`, `::1`) is allowed with no opt-in.
+  Nothing leaves your machine.
+* Any **other host** is refused by default, and the refusal is reported in the
+  tool response rather than only written to a log. Setting
+  `JDATAMUNCH_ALLOW_REMOTE_SUMMARIZER=1` is the opt-in. Pointing this at a hosted
+  provider means your data leaves your machine and you pay per call — a decision
+  you should make deliberately, not by pasting a URL.
+
+**Failures never break anything.** A summarizer that is unreachable, slow, or
+returns nonsense falls back to the rule-based text. Indexing and every tool call
+succeed either way. After 3 consecutive failures the module stops calling for the
+rest of the process, so a dead endpoint is not billed once per column.
+
+**You can always tell which you got.** `index_local` and `summarize_dataset`
+include a `summarizer` block in their response naming the provider, its state
+(`ready` / `disabled` / `misconfigured` / `refused`), the detail of any refusal,
+and a count of summaries from each path. Where a summary is served back later
+(`describe_dataset`, `describe_column`), a model-authored summary is marked
+`ai_summary_source: "llm"`; the marker is absent otherwise.
+
+**Transparency note.** `ai_summary` in `index.json` carries the source
+(`"llm"` or `"rule_based"`) for whatever wrote it, so a summary can still be
+attributed long after the fact.
 
 Set environment variables in your terminal, shell profile, or MCP client config (some clients support `env` blocks).
 

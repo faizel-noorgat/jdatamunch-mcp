@@ -2,6 +2,74 @@
 
 ## [Unreleased]
 
+### Added - an OpenAI-compatible embedding provider, and an LLM summarizer that defaults to not existing
+
+Two opt-in features, both off unless named.
+
+**Embeddings.** `JDATAMUNCH_EMBEDDING_PROVIDER=openai-compatible` reaches any
+endpoint speaking the OpenAI embeddings API (Ollama, llama.cpp, LM Studio, vLLM,
+Voyage AI, a gateway) via `JDATAMUNCH_OPENAI_COMPAT_URL` +
+`JDATAMUNCH_OPENAI_COMPAT_MODEL`, with `JDATAMUNCH_OPENAI_COMPAT_API_KEY`
+(defaulting to the literal `local`) and `JDATAMUNCH_OPENAI_COMPAT_BATCH_SIZE`
+(default 32, non-integer or `<= 0` ignored). ⚠ **It is never auto-detected.** A
+URL sitting in the environment is not a decision, so the provider name is the
+opt-in; `JDATAMUNCH_EMBEDDING_PROVIDER` also REFUSES an unrecognised value
+rather than falling through to auto-detect, because a typo that quietly selected
+a *different* provider is how indexed rows leave the machine unasked. The key
+deliberately does not fall back to `OPENAI_API_KEY`. A failed batch appends
+empty vectors and the remaining batches still run.
+
+**Summaries.** `summarizer.py` was always rule-based and `ai_summary` was always
+written by it — the field name is a legacy of a design that never existed, and
+`SECURITY.md` described `JDATAMUNCH_USE_AI_SUMMARIES` as gating a network call
+it never made. A real LLM path now exists, off by default:
+`JDATAMUNCH_SUMMARIZER_PROVIDER=openai-compatible` plus
+`JDATAMUNCH_SUMMARIZER_URL` / `JDATAMUNCH_SUMMARIZER_MODEL` (both required;
+a missing one is named), `JDATAMUNCH_SUMMARIZER_API_KEY` (default `local`),
+`JDATAMUNCH_SUMMARIZER_TIMEOUT` (default 30s).
+
+⚠⚠ **The remote guard is the load-bearing part.** A prompt carries column names,
+statistics and **sample values**, and sample values are where PII lives. A
+non-loopback URL is REFUSED unless `JDATAMUNCH_ALLOW_REMOTE_SUMMARIZER=1`, and
+the refusal is returned in the tool response — a refusal that only reaches a log
+is indistinguishable from a model with nothing to say, and the user ends up
+reading rule-based text believing a model wrote it. `status()` returns the
+refusal as data; `index_local` and `summarize_dataset` carry a `summarizer`
+block (provider, state, refusal detail, and a count from each path) as a
+TOP-LEVEL key, because jdata's default `meta_fields` strips `_meta` — the same
+reason the truncation disclosure (1.31.2) and budget block (1.21.0) sit there.
+`describe_dataset` / `describe_column` mark a summary `ai_summary_source: "llm"`
+only when that is true, so absence always means "not model-authored" and the
+default install's response bytes are unchanged.
+
+Nothing in the summarizer may raise into an index or a tool call: any exception,
+timeout, empty or nonsense completion falls back to the rule-based text, and
+after 3 consecutive failures it stops calling for the rest of the process. An
+unrecognised provider name is refused rather than auto-detected (jdocmunch
+proved that trap), and `openrouter` is not a value here.
+
+`index.json` gains `ai_summary_source` per column and `dataset_summary_source`
+at the dataset level — additive and None-defaulted, loading a legacy index
+still works (verified), no `INDEX_VERSION` bump, no tool-count or schema change.
+Measured: with nothing configured, `index_local` / `describe_dataset` /
+`describe_column` responses are **byte-identical** to the pre-change tree once
+the wall-clock fields (`indexed_at`, `duration_seconds`, `recorded_at`) are
+normalized — those differ between any two runs, before or after this change —
+and `index.json` differs only in those two provenance keys, with every
+`ai_summary` string unchanged.
+
+**Also:** `openai` was imported by `embeddings.py` and declared nowhere, so the
+install instruction had to be a raw `pip install openai`; there is now an
+`openai` extra, and it is in `all`. The `anthropic` extra is left in place
+although nothing in `src/` imports it — `SECURITY.md` now says so rather than
+describing it as "AI summaries".
+
+Tests: `tests/test_openai_compat_embeddings.py` (31) +
+`tests/test_llm_summarizer.py` (50). Suite **944 passed / 34 skipped**, unchanged
+skip count. Four ratchets verified non-vacuous by reintroducing the defect
+(remote guard, unrecognised provider, off-by-default, unconditional source
+marker).
+
 ### Fixed - the Sonnet rate was written for a date that never arrived
 
 `storage/token_tracker.PRICING` carried `claude_sonnet` at **$3.00 / 1M input

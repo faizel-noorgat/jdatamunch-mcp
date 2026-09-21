@@ -14,6 +14,7 @@ from ..redact import (
 )
 from ..storage.data_store import DataStore
 from ..storage.token_tracker import estimate_savings, record_savings, cost_avoided
+from ..summarizer import SOURCE_LLM
 
 
 def _offload():
@@ -157,6 +158,9 @@ def describe_column(
 
     if col_data.get("ai_summary"):
         result["ai_summary"] = col_data["ai_summary"]
+        # Served only when model-authored — see describe_dataset.
+        if col_data.get("ai_summary_source") == SOURCE_LLM:
+            result["ai_summary_source"] = SOURCE_LLM
 
     response_bytes = len(json.dumps(result).encode("utf-8"))
     tokens_saved = estimate_savings(idx.source_size_bytes, response_bytes)

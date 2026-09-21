@@ -7,6 +7,7 @@ from typing import Optional
 from ..config import get_index_path, MAX_COLUMNS_DESCRIBE
 from ..storage.data_store import DataStore
 from ..storage.token_tracker import estimate_savings, record_savings, cost_avoided
+from ..summarizer import SOURCE_LLM
 
 
 def describe_dataset(
@@ -81,6 +82,14 @@ def describe_dataset(
             s["top_values"] = c["top_values"][:5]  # preview only; use describe_column for full
         if c.get("ai_summary"):
             s["ai_summary"] = c["ai_summary"]
+            # Served only when the text is model-authored. `ai_summary` is not
+            # always AI-authored — with no summarizer configured it is rule-based
+            # prose — so the marker must be present exactly when it is true and
+            # never merely implied. Absence therefore means "not model-authored",
+            # which is the safe reading, and it keeps the default response's
+            # bytes unchanged. index.json carries the explicit "rule_based" value.
+            if c.get("ai_summary_source") == SOURCE_LLM:
+                s["ai_summary_source"] = SOURCE_LLM
         col_summaries.append(s)
 
     # Token savings: raw file vs this response
@@ -98,6 +107,11 @@ def describe_dataset(
         "columns": col_summaries,
         "dataset_summary": idx.dataset_summary,
     }
+    # Same rule as the column marker above: present exactly when the text is
+    # model-authored, absent (and byte-identical to a pre-summarizer response)
+    # otherwise.
+    if idx.dataset_summary and getattr(idx, "dataset_summary_source", None) == SOURCE_LLM:
+        result_body["dataset_summary_source"] = SOURCE_LLM
     if column_pagination:
         result_body["column_pagination"] = column_pagination
 

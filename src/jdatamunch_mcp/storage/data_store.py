@@ -47,6 +47,10 @@ class DataIndex:
     fingerprint: Optional[str] = None  # C2: content fingerprint independent of filename/path
     learned_null_tokens: list = field(default_factory=list)  # C3: detected sentinel-like tokens
     coverage: Optional[dict] = None  # 1.20.0: ingest coverage (walk, rows_indexed, skip_counts, recorded_at)
+    # "rule_based" or "llm" — the path that produced dataset_summary. Additive and
+    # None-defaulted: legacy indexes load fine and absence reads as "not recorded",
+    # which is honest about an index written before the field existed.
+    dataset_summary_source: Optional[str] = None
 
 
 def _hash_file(path: str) -> str:
@@ -96,6 +100,7 @@ def _profile_to_dict(p: Any) -> dict:
         "datetime_max": p.datetime_max,
         "datetime_format": p.datetime_format,
         "ai_summary": p.ai_summary,
+        "ai_summary_source": getattr(p, "ai_summary_source", None),
     }
 
 
@@ -115,6 +120,7 @@ def _index_to_dict(idx: DataIndex) -> dict:
         "columns": idx.columns,  # already dicts
         "sqlite_relative_path": idx.sqlite_relative_path,
         "dataset_summary": idx.dataset_summary,
+        "dataset_summary_source": getattr(idx, "dataset_summary_source", None),
         "fingerprint": idx.fingerprint,
         "learned_null_tokens": idx.learned_null_tokens,
         "coverage": idx.coverage,
@@ -202,6 +208,7 @@ def _index_from_dict(d: dict) -> DataIndex:
         columns=d.get("columns", []),
         sqlite_relative_path=d.get("sqlite_relative_path", "data.sqlite"),
         dataset_summary=d.get("dataset_summary"),
+        dataset_summary_source=d.get("dataset_summary_source"),
         fingerprint=d.get("fingerprint"),
         learned_null_tokens=d.get("learned_null_tokens", []),
         coverage=d.get("coverage"),
@@ -297,6 +304,7 @@ class DataStore:
         encoding: str,
         delimiter: str,
         dataset_summary: Optional[str] = None,
+        dataset_summary_source: Optional[str] = None,
         fingerprint: Optional[str] = None,
         learned_null_tokens: Optional[list] = None,
         coverage: Optional[dict] = None,
@@ -321,6 +329,7 @@ class DataStore:
             delimiter=delimiter,
             columns=column_dicts,
             dataset_summary=dataset_summary,
+            dataset_summary_source=dataset_summary_source,
             fingerprint=fingerprint,
             learned_null_tokens=learned_null_tokens or [],
             coverage=coverage,

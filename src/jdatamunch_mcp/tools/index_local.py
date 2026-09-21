@@ -23,7 +23,12 @@ from ..storage.data_store import DataStore
 from ..storage import result_cache
 from ..storage.sqlite_store import create_table, BulkInserter, create_indexes
 from ..storage.token_tracker import record_savings, estimate_savings
-from ..summarizer import summarize_dataset, summarize_column
+from ..summarizer import (
+    SOURCE_LLM,
+    summarize_column_auto,
+    summarize_dataset_auto,
+    summarizer_report,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -258,10 +263,14 @@ def index_local(
         from ..profiler.null_learner import learn_null_tokens
         col_dicts = [_profile_to_dict(prof) for prof in profiles]
         for prof, col_dict in zip(profiles, col_dicts):
-            prof.ai_summary = summarize_column(col_dict)
+            # Auto: the configured LLM when there is one, the rule-based text
+            # otherwise. Never raises — a summarizer outage cannot fail an index.
+            summary = summarize_column_auto(col_dict)
+            prof.ai_summary = summary.text
+            prof.ai_summary_source = summary.source
         learned_nulls = learn_null_tokens(col_dicts)
 
-        ds_summary = summarize_dataset(
+        ds_summary_result = summarize_dataset_auto(
             dataset_id=dataset_id,
             columns=col_dicts,
             row_count=row_count,
@@ -323,7 +332,8 @@ def index_local(
             row_count=row_count,
             encoding=meta.get("encoding", "utf-8"),
             delimiter=meta.get("delimiter") or "",
-            dataset_summary=ds_summary,
+            dataset_summary=ds_summary_result.text,
+            dataset_summary_source=ds_summary_result.source,
             fingerprint=fingerprint,
             learned_null_tokens=learned_nulls,
             coverage=coverage,
@@ -370,18 +380,34 @@ def index_local(
         except Exception:
             pass
 
+    # Provenance of every summary this run produced (profiles + the dataset one).
+    # `summarizer_report` returns None when no LLM is configured, so an
+    # unconfigured install's response is unchanged.
+    llm_summary_count = sum(
+        1 for p_ in profiles if getattr(p_, "ai_summary_source", None) == SOURCE_LLM
+    )
+    if idx.dataset_summary_source == SOURCE_LLM:
+        llm_summary_count += 1
+    summarizer_block = summarizer_report(
+        llm_summary_count, (len(profiles) + 1) - llm_summary_count
+    )
+
+    result_body: dict = {
+        "dataset": dataset_id,
+        "file": p.name,
+        "rows": row_count,
+        "columns": n_cols,
+        "size_bytes": meta.get("file_size", 0),
+        "column_types": type_counts,
+        "depth": depth,
+        "indexed_at": idx.indexed_at,
+        "duration_seconds": round(duration_s, 1),
+    }
+    if summarizer_block is not None:
+        result_body["summarizer"] = summarizer_block
+
     return {
-        "result": {
-            "dataset": dataset_id,
-            "file": p.name,
-            "rows": row_count,
-            "columns": n_cols,
-            "size_bytes": meta.get("file_size", 0),
-            "column_types": type_counts,
-            "depth": depth,
-            "indexed_at": idx.indexed_at,
-            "duration_seconds": round(duration_s, 1),
-        },
+        "result": result_body,
         "_meta": {
             "timing_ms": round(duration_s * 1000, 1),
             "tokens_saved": tokens_saved,

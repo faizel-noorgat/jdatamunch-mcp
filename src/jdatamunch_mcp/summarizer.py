@@ -1,11 +1,42 @@
-"""Rule-based natural-language summaries for datasets and columns.
+"""Natural-language summaries for datasets and columns.
 
-Generates human-readable summaries from profiled statistics — no external
-API calls required.  Summaries are stored in index.json and surfaced by
-describe_dataset / describe_column.
+Two paths produce this text:
+
+* **Rule-based** (the default, and the fallback for everything else). Built
+  from profiled statistics, deterministic, no external API calls. Unchanged
+  since it was written — `summarize_column` / `summarize_dataset` still return
+  exactly the strings they always did.
+* **LLM** (opt-in, OFF by default). `summarize_column_auto` /
+  `summarize_dataset_auto` ask the configured endpoint in
+  :mod:`jdatamunch_mcp.llm_summarizer` first and fall back to the rule-based
+  text on any failure.
+
+Both paths return a :class:`Summary`, which carries `source` ("llm" or
+"rule_based") alongside the text. **The two are never presented as the same
+thing**: the source is written into the index next to the summary and served by
+describe_dataset / describe_column, because a stored sentence whose author is
+unknowable is exactly the confusion the field exists to prevent.
+
+Summaries are stored in index.json and surfaced by describe_dataset /
+describe_column.
 """
 
+from dataclasses import dataclass
 from typing import Any, Optional
+
+from . import llm_summarizer
+
+# Values of Summary.source.
+SOURCE_LLM = "llm"
+SOURCE_RULE_BASED = "rule_based"
+
+
+@dataclass(frozen=True)
+class Summary:
+    """A summary together with the path that produced it."""
+
+    text: str
+    source: str
 
 
 # ---------------------------------------------------------------------------
@@ -251,3 +282,174 @@ def summarize_dataset(
     # Assemble
     parts = [opening, type_line, pk_line, temporal_line, domain_line, quality_line]
     return " ".join(p for p in parts if p).strip()
+
+
+# ---------------------------------------------------------------------------
+# Optional LLM path
+#
+# ⚠ Everything below is inert unless JDATAMUNCH_SUMMARIZER_PROVIDER is set. With
+# nothing configured the prompts are never built and llm_summarizer.summarize()
+# returns None immediately, so the rule-based text above is what comes out.
+#
+# The prompts carry column names, types, statistics and sample values off this
+# machine when an endpoint is configured. Sample values are the part that
+# matters: they are frequently PII, which is why the remote guard in
+# llm_summarizer refuses a non-loopback URL by default.
+# ---------------------------------------------------------------------------
+
+_COLUMN_PROMPT = """\
+Summarise one column of a tabular dataset for a data analyst.
+
+Reply with ONE sentence of at most 25 words describing what the column holds.
+No preamble, no quotes, no markdown, no bullet points.
+
+{body}
+
+Summary:"""
+
+_DATASET_PROMPT = """\
+Summarise a tabular dataset for a data analyst.
+
+Reply with at most three sentences describing what the data appears to be and
+anything notable about its quality. No preamble, no quotes, no markdown.
+
+{body}
+
+Summary:"""
+
+
+def _bullet(label: str, value: Any) -> Optional[str]:
+    if value is None or value == "" or value == []:
+        return None
+    return f"{label}: {value}"
+
+
+def _build_column_prompt(col: dict) -> str:
+    """Prompt for one column profile. Never raises."""
+    try:
+        top = col.get("top_values") or []
+        top_preview = ", ".join(f"{t['value']} ({t['count']})" for t in top[:10])
+        body = [
+            _bullet("name", col.get("name")),
+            _bullet("type", col.get("type")),
+            _bullet("rows", col.get("count")),
+            _bullet("null_count", col.get("null_count")),
+            _bullet("null_percent", col.get("null_pct")),
+            _bullet("distinct_values", col.get("cardinality")),
+            _bullet("min", col.get("min")),
+            _bullet("max", col.get("max")),
+            _bullet("mean", col.get("mean")),
+            _bullet("median", col.get("median")),
+            _bullet("datetime_min", col.get("datetime_min")),
+            _bullet("datetime_max", col.get("datetime_max")),
+            _bullet("semantic_type", col.get("semantic_type")),
+            _bullet("top_values", top_preview),
+            _bullet("sample_values", ", ".join(str(v) for v in (col.get("sample_values") or [])[:10])),
+        ]
+        return _COLUMN_PROMPT.format(body="\n".join(b for b in body if b))[
+            : llm_summarizer.MAX_PROMPT_CHARS
+        ]
+    except Exception:
+        return ""
+
+
+def _build_dataset_prompt(columns: list[dict], row_count: int, source_format: str) -> str:
+    """Prompt for a dataset. Never raises.
+
+    Deliberately omits `dataset_id` and `source_path`: neither appears in the
+    rule-based summary, and a filename is one more thing to send off-machine
+    for no gain in the answer.
+    """
+    try:
+        type_counts: dict[str, int] = {}
+        for c in columns:
+            t = c.get("type", "string")
+            type_counts[t] = type_counts.get(t, 0) + 1
+        pk_cols = [c["name"] for c in columns if c.get("is_primary_key_candidate")]
+        high_null = [c["name"] for c in columns if c.get("null_pct", 0) >= 20]
+        constant = [
+            c["name"] for c in columns
+            if c.get("cardinality", 0) == 1 and c.get("null_pct", 0) < 50
+        ]
+        body = [
+            _bullet("format", source_format),
+            _bullet("rows", row_count),
+            _bullet("columns", len(columns)),
+            _bullet("column_types", ", ".join(f"{v} {k}" for k, v in type_counts.items())),
+            _bullet("column_names", ", ".join(str(c.get("name")) for c in columns)),
+            _bullet("primary_key_candidates", ", ".join(pk_cols)),
+            _bullet("columns_over_20_percent_null", ", ".join(high_null)),
+            _bullet("single_value_columns", ", ".join(constant)),
+            _bullet("likely_domain", _classify_domain(columns)),
+        ]
+        return _DATASET_PROMPT.format(body="\n".join(b for b in body if b))[
+            : llm_summarizer.MAX_PROMPT_CHARS
+        ]
+    except Exception:
+        return ""
+
+
+def summarize_column_auto(col: dict) -> Summary:
+    """Column summary via the configured LLM when there is one, else rule-based.
+
+    Never raises, and never returns LLM text without saying so.
+    """
+    try:
+        text = llm_summarizer.summarize(_build_column_prompt(col))
+    except Exception:  # pragma: no cover - summarize() is already total
+        text = None
+    if text:
+        return Summary(text=text, source=SOURCE_LLM)
+    return Summary(text=summarize_column(col), source=SOURCE_RULE_BASED)
+
+
+def summarize_dataset_auto(
+    dataset_id: str,
+    columns: list[dict],
+    row_count: int,
+    source_format: str,
+    source_size_bytes: int,
+    source_path: Optional[str] = None,
+) -> Summary:
+    """Dataset summary via the configured LLM when there is one, else rule-based.
+
+    Takes the same arguments as :func:`summarize_dataset` so a caller can swap
+    one for the other, and returns the same text when no LLM is configured.
+    """
+    try:
+        text = llm_summarizer.summarize(
+            _build_dataset_prompt(columns, row_count, source_format)
+        )
+    except Exception:  # pragma: no cover - summarize() is already total
+        text = None
+    if text:
+        return Summary(text=text, source=SOURCE_LLM)
+    return Summary(
+        text=summarize_dataset(
+            dataset_id=dataset_id,
+            columns=columns,
+            row_count=row_count,
+            source_format=source_format,
+            source_size_bytes=source_size_bytes,
+            source_path=source_path,
+        ),
+        source=SOURCE_RULE_BASED,
+    )
+
+
+def summarizer_report(llm_count: int, rule_based_count: int) -> Optional[dict]:
+    """Build the `summarizer` block for a tool response, or None when unused.
+
+    Returns None — so the response is byte-identical to a pre-LLM install —
+    unless an LLM summarizer is configured. Once one IS configured the block is
+    always present, including when it was refused or failed, because "we tried
+    and fell back" is precisely what a caller must not have to guess.
+    """
+    block = llm_summarizer.status()
+    if block.get("state") == "disabled":
+        return None
+    return {
+        **block,
+        "summaries_from_llm": llm_count,
+        "summaries_rule_based": rule_based_count,
+    }

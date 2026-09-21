@@ -264,6 +264,11 @@ class ColumnProfile:
     datetime_max: Optional[str] = None
     datetime_format: Optional[str] = None
     ai_summary: Optional[str] = None
+    # "rule_based" (the default) or "llm". Stored beside the text so a summary
+    # served months later by describe_column still says who wrote it: the field
+    # is named ai_summary, and before this key existed it was rule-based prose
+    # that had never been near a model.
+    ai_summary_source: Optional[str] = None
 
 
 def finalize_profile(acc: _ColAcc) -> ColumnProfile:
